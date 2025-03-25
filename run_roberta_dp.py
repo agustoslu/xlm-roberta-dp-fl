@@ -1,22 +1,18 @@
 import os
 import pandas as pd
 import numpy as np
-from download import train_path, dev_path, test_path
 from transformers import AutoConfig, AutoTokenizer, AutoModelForSequenceClassification
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 import torch
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 import re
+import json
 from tqdm import tqdm
 import opacus
 from opacus.utils.uniform_sampler import UniformWithReplacementSampler
 from opacus import PrivacyEngine
 from opacus.utils.batch_memory_manager import BatchMemoryManager
 
-
-MODEL_ID = "xlm-roberta-base"
-MAX_SEQ_LENGTH = 128
-LANGUAGE = "en"
 
 def load_config(model_id):
     return AutoConfig.from_pretrained(model_id, num_labels=3)
@@ -50,72 +46,6 @@ def freeze_layers(model):
     
     return model
 
-def clean_str(data):
-    """
-    fix broken JSON<<
-    """
-    
-    # single quote to double quote
-    cleaned = re.sub(r"(?<!\w)'(.*?)'(?!\w)", r'"\1"', data)
-
-    # clean numpy artifacts
-    if "array(" in data:
-        cleaned = cleaned.replace("array(", "").replace("dtype=object)", "")  
-        cleaned = re.sub(r"\n\s+", " ", cleaned) 
-
-    # clean extra commas and trailing commas
-    cleaned = re.sub(r",\s*,", ",", cleaned)
-    cleaned = re.sub(r",\s*}", "}", cleaned)
-    cleaned = re.sub(r",\s*]", "]", cleaned)
-
-    return cleaned
-
-def extract_lang(df):
-    new_rows = []
-    malformed_premise = []
-    malformed_hypothesis = []
-    for _, row in df.iterrows():    
-        # string to dict
-        if pd.notna(row["premise"]):
-            premise = clean_str(row["premise"])
-            try:
-                premise_dict = json.loads(premise)
-        
-            except json.JSONDecodeError:
-                malformed_premise.append(row["premise"])
-                continue
-        else:
-            premise_dict = {}
-        
-        if pd.notna(row["hypothesis"]):
-            hypothesis = clean_str(row["hypothesis"])
-
-            try:
-                hypothesis_dict = json.loads(hypothesis)
-        
-            except json.JSONDecodeError:
-                malformed_hypothesis.append(row["premise"])
-                continue
-        else: 
-            hypothesis_dict = {}
-        
-        label = row["label"]
-        
-        for lang, premise_text in premise_dict.items():
-            try:
-                hypothesis_text = hypothesis_dict["translation"][hypothesis_dict["language"].index(lang)]
-            except (ValueError, KeyError):
-                hypothesis_text = None 
-            new_rows.append({
-                "language": lang,
-                "premise": premise_text,
-                "hypothesis": hypothesis_text,
-                "label": label
-            })
-            
-    return pd.DataFrame(new_rows)
-
-
 def process_data(examples, tokenizer):
     return tokenizer(
         examples["premise"], 
@@ -125,25 +55,13 @@ def process_data(examples, tokenizer):
         max_length=MAX_SEQ_LENGTH,
     )
 
+def prepare_data(tokenizer, language):
 
-def prepare_data(tokenizer, language, train_path, dev_path, test_path):
+    xnli_data = load_dataset("xnli", language)
 
-    train_df = pd.read_csv(train_path)
-    dev_df = pd.read_csv(dev_path)
-    test_df = pd.read_csv(test_path)
-
-    train_df = extract_lang(train_df)
-    dev_df = extract_lang(dev_df)
-    test_df = extract_lang(test_df)
-
-    # HF dataset convert, filter, tokenize, torchify
-    train_dataset = Dataset.from_pandas(train_df)
-    dev_dataset = Dataset.from_pandas(dev_df)
-    test_dataset = Dataset.from_pandas(test_df)
-    
-    train_dataset = train_dataset.filter(lambda x: x["language"] == language)
-    dev_dataset = dev_dataset.filter(lambda x: x["language"] == language)
-    test_dataset = test_dataset.filter(lambda x: x["language"] == language)
+    train_dataset = xnli_data["train"]
+    dev_dataset = xnli_data["validation"]
+    test_dataset = xnli_data["test"]
     
     train_dataset = train_dataset.map(lambda x: process_data(x, tokenizer), batched=True)
     dev_dataset = dev_dataset.map(lambda x: process_data(x, tokenizer), batched=True)
@@ -182,7 +100,15 @@ def evaluate(model):
 
 if __name__ == "__main__":
 
+    # fix data loading 
+    # define train function
+    # define cli function where you keep all arguments
+    # keep constants in one place
+
     # constants
+    MODEL_ID = "xlm-roberta-base"
+    MAX_SEQ_LENGTH = 128
+    LANGUAGE = "en"
     BATCH_SIZE = 32
     MAX_PHYSICAL_BATCH_SIZE = 8
     
@@ -190,7 +116,7 @@ if __name__ == "__main__":
     tokenizer = create_tokenizer(MODEL_ID)
     model = load_model(MODEL_ID, config)
 
-    train_set, dev_set, test_set = prepare_data(tokenizer, language=LANGUAGE, train_path=train_path, dev_path=dev_path, test_path=test_path)
+    train_set, dev_set, test_set = prepare_data(tokenizer, language=LANGUAGE)
 
     model = freeze_layers(model)
 
