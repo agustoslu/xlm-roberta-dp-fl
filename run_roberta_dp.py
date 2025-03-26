@@ -1,4 +1,6 @@
 import os
+import time
+from datetime import datetime
 import pandas as pd
 import numpy as np
 from transformers import AutoConfig, AutoTokenizer, AutoModelForSequenceClassification
@@ -13,6 +15,7 @@ from opacus import PrivacyEngine
 from opacus.utils.batch_memory_manager import BatchMemoryManager
 import argparse
 from peft import get_peft_model, LoraConfig, TaskType
+from pyinstrument import Profiler
 
 # constants 
 # required delta hyperparameter computed dynamically based on the dataset size below
@@ -20,7 +23,7 @@ MODEL_ID = "xlm-roberta-base"
 LANGUAGE = "en"
 BATCH_SIZE = 32
 MAX_PHYSICAL_BATCH_SIZE = 8
-EPOCHS = 3
+EPOCHS = 1
 LOGGING_INTERVAL = 5000
 EPSILON = 7.5
 MAX_GRAD_NORM = 0.1
@@ -120,7 +123,7 @@ def train(model, train_dataloader, test_dataloader, optimizer, device, privacy_e
                     print(f"Epoch: {epoch} | Step: {step} | Train loss: {train_loss:.3f} | Eval loss: {eval_loss:.3f} | Eval accuracy: {eval_accuracy:.3f} | ɛ: {eps:.2f}")
         
 
-def evaluate(model):
+def evaluate(model, test_dataloader, device):
     model.eval()
 
     loss_list = []
@@ -174,9 +177,11 @@ def parse_command_line_args():
     parser.add_argument("--privacy_mode", type=str, default="vanilla", choices=["vanilla", "ghost-clipping"],
                         help="Choose between Vanilla DP-SGD and Ghost Clipping")
     parser.add_argument("--use_lora", action="store_true", help="Enable LoRA")
+    parser.add_argument("--profile", action="store_true", default=False, help="Enable Profiling")
     args = parser.parse_args()
     print(f"Privacy Mode: {args.privacy_mode}")
     print(f"Using LoRA: {args.use_lora}")
+    print(f"Profiling enabled: {args.profile} ")
     return args
 
 if __name__ == "__main__":
@@ -200,5 +205,14 @@ if __name__ == "__main__":
     delta = compute_delta(train_dataloader)
 
     model, optimizer, train_dataloader, criterion, privacy_engine = initialize_privacy_engine(model, optimizer, train_dataloader, args.privacy_mode, delta)
-    
-    train(model, train_dataloader, test_dataloader, optimizer, device, privacy_engine, criterion, delta=delta, epochs=EPOCHS, log_interval=LOGGING_INTERVAL, max_batch_size=MAX_PHYSICAL_BATCH_SIZE)
+
+    if args.profile:
+        profiler = Profiler(interval=0.10)
+        with profiler:
+            train(model, train_dataloader, test_dataloader, optimizer, device, privacy_engine, criterion, delta=delta, epochs=EPOCHS, log_interval=LOGGING_INTERVAL, max_batch_size=MAX_PHYSICAL_BATCH_SIZE)
+        os.makedirs("profiles", exist_ok=True)
+        profiler.write_html(
+            f"profiles/profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+        )
+    else:
+        train(model, train_dataloader, test_dataloader, optimizer, device, privacy_engine, criterion, delta=delta, epochs=EPOCHS, log_interval=LOGGING_INTERVAL, max_batch_size=MAX_PHYSICAL_BATCH_SIZE)
