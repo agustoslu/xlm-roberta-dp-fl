@@ -12,6 +12,7 @@ from opacus.utils.uniform_sampler import UniformWithReplacementSampler
 from opacus import PrivacyEngine
 from opacus.utils.batch_memory_manager import BatchMemoryManager
 import argparse
+from peft import get_peft_model, LoraConfig, TaskType
 
 # constants 
 # required delta hyperparameter computed dynamically based on the dataset size below
@@ -33,7 +34,7 @@ def load_model(model_id, config):
 def create_tokenizer(model_id):
     return AutoTokenizer.from_pretrained(model_id, do_lower_case=False)
 
-def freeze_layers(model):
+def freeze_layers(model, lora):
     # only freeze last encoder layer and classifier layer(linear)
     # total params: 278,045,955
     # trainable params: 7,680,771
@@ -41,18 +42,36 @@ def freeze_layers(model):
     trainable_layers = [model.roberta.encoder.layer[-1], model.classifier]
     total_params = 0
     trainable_params = 0
-
-    for p in model.parameters():
-        p.requires_grad = False
-        total_params += p.numel()
     
-    for l in trainable_layers:
-        for p in l.parameters():
-            p.requires_grad = True
-            trainable_params += p.numel()
+    if lora:
+        lora_config = LoraConfig(
+        task_type=TaskType.SEQ_CLS,  
+        inference_mode=False,  
+        r=32,  
+        lora_alpha=32,  
+        lora_dropout=0.05,
+    )
+        model = get_peft_model(model, lora_config)
 
-    print(f"total params: {total_params:,}")
-    print(f"trainable params: {trainable_params:,}")
+        # freeze the params in the first 11 attention layers
+        for p in model.roberta.encoder.layer[:-1].parameters():
+            p.requires_grad = False
+
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"total trainable params with LoRA after freezing: {trainable_params:,}") # 691,203 
+
+    else: 
+        for p in model.parameters():
+            p.requires_grad = False
+            total_params += p.numel()
+        
+        for l in trainable_layers:
+            for p in l.parameters():
+                p.requires_grad = True
+                trainable_params += p.numel()
+
+        print(f"total params: {total_params:,}")
+        print(f"trainable params: {trainable_params:,}")
     
     return model
 
@@ -154,8 +173,10 @@ def parse_command_line_args():
     parser = argparse.ArgumentParser(description="Run DP RoBERTa with Vanilla DP-SGD or Ghost Clipping")
     parser.add_argument("--privacy_mode", type=str, default="vanilla", choices=["vanilla", "ghost-clipping"],
                         help="Choose between Vanilla DP-SGD and Ghost Clipping")
+    parser.add_argument("--use_lora", action="store_true", help="Enable LoRA")
     args = parser.parse_args()
     print(f"Privacy Mode: {args.privacy_mode}")
+    print(f"Using LoRA: {args.use_lora}")
     return args
 
 if __name__ == "__main__":
@@ -164,7 +185,7 @@ if __name__ == "__main__":
     config = load_config(MODEL_ID)
     tokenizer = create_tokenizer(MODEL_ID)
     model = load_model(MODEL_ID, config)
-    model = freeze_layers(model)
+    model = freeze_layers(model, args.use_lora)
 
     train_set, _, test_set = prepare_data(tokenizer, language=LANGUAGE)
 
@@ -179,5 +200,5 @@ if __name__ == "__main__":
     delta = compute_delta(train_dataloader)
 
     model, optimizer, train_dataloader, criterion, privacy_engine = initialize_privacy_engine(model, optimizer, train_dataloader, args.privacy_mode, delta)
-
+    
     train(model, train_dataloader, test_dataloader, optimizer, device, privacy_engine, criterion, delta=delta, epochs=EPOCHS, log_interval=LOGGING_INTERVAL, max_batch_size=MAX_PHYSICAL_BATCH_SIZE)
